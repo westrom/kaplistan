@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <title>Kaplista med Visualisering</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; max-width: 900px; }
+    input, button, select { padding: 0.5em; font-size: 1em; }
+    button { background-color: #4285f4; color: white; border: none; cursor: pointer; }
+    button:hover { background-color: #3367d6; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 1em; }
+    th, td { border: 1px solid #ccc; padding: 0.5em; text-align: center; }
+    .settings-section { margin-bottom: 1em; }
+    .board { display: flex; border: 1px solid #666; margin-bottom: 1em; height: 30px; }
+    .cut { background: #4285f4; position: relative; }
+    .cut:hover { background: #3367d6; }
+    .cut::after { content: attr(data-label); position: absolute; top: 100%; left: 50%; transform: translateX(-50%); font-size: 0.75em; white-space: nowrap; }
+    .kerf-gap { flex: 0 0 auto; }
+    #toast { display: none; position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 20px; border-radius: 4px; }
+    #toast button { background: transparent; border: 1px solid #fff; color: #fff; margin-left: 10px; cursor: pointer; }
+    #pdfButton { display: none; margin-top: 1em; }
+  </style>
+</head>
+<body>
+  <h1>Kaplista-generator</h1>
+
+  <h2>Behov</h2>
+  <table id="needsTable">
+    <thead>
+      <tr><th>Längd (mm)</th><th>Bredd (mm)</th><th>Antal</th><th></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><input type="number" value="2048" min="0" /></td>
+        <td><input list="widths" class="widthInput" value="95" /></td>
+        <td><input type="number" value="6" min="0" /></td>
+        <td><button onclick="removeRow(this)">Ta bort</button></td>
+      </tr>
+      <tr>
+        <td><input type="number" value="450" min="0" /></td>
+        <td><input list="widths" class="widthInput" value="45" /></td>
+        <td><input type="number" value="6" min="0" /></td>
+        <td><button onclick="removeRow(this)">Ta bort</button></td>
+      </tr>
+    </tbody>
+  </table>
+  <button onclick="addRow()">Lägg till rad</button>
+  <datalist id="widths"><option value="45"><option value="95"><option value="120"><option value="145"><option value="170"><option value="195"></datalist>
+
+  <div class="settings-section">
+    <h2>Inställningar</h2>
+    <label>Kapmån (mm):<br /><input id="kerfInput" type="number" value="3" min="0" /></label>
+
+    <h3>Lagerföring per bredd</h3>
+    <div id="stockByWidth"></div>
+  </div>
+
+  <h2>Visualisering</h2>
+  <div class="radio-group">
+    <label><input type="radio" name="mode" value="simple" checked /> Enkel</label>
+    <label><input type="radio" name="mode" value="advanced" /> Avancerad</label>
+  </div>
+  
+
+  <h2>Resultat</h2>
+  <div id="result">Tryck på knappen ovan för att generera kaplista...</div>
+  <div id="toast">Resultatet har uppdaterats</div>
+  <button id="pdfButton" onclick="downloadPDF()">Ladda ner som PDF</button>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script>
+    // Dynamiska lagerinställningar
+    function updateStockByWidth() {
+      const container = document.getElementById('stockByWidth');
+      container.innerHTML = '';
+      const widths = [...new Set(Array.from(document.querySelectorAll('#needsTable tbody .widthInput')).map(i=>parseInt(i.value)||0))].filter(w=>w>0);
+      widths.forEach(w=>{
+        const div = document.createElement('div');
+        div.innerHTML = `<strong>${w} mm:</strong> ` + [2700,3000,3300,3600,3900,4200,4500,4800,5100,5400]
+          .map(len=>`<label><input type=checkbox data-width='${w}' value='${len}' checked/>${len} mm</label>`).join(' ');
+        container.appendChild(div);
+      });
+    }
+
+    function addRow() {
+      const tbody = document.querySelector('#needsTable tbody');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><input type='number' min='0'/></td><td><input list='widths' class='widthInput'/></td><td><input type='number' min='0'/></td><td><button onclick='removeRow(this)'>Ta bort</button></td>`;
+      tbody.appendChild(tr);
+      attachListeners();
+    }
+    function removeRow(btn){ btn.closest('tr').remove(); updateStockByWidth(); }
+
+    function attachListeners(){
+      document.querySelectorAll('.widthInput').forEach(i=>i.onchange=updateStockByWidth);
+    }
+
+    function parseNeeds(){
+      return Array.from(document.querySelectorAll('#needsTable tbody tr')).map(row=>{
+        const length=parseInt(row.cells[0].querySelector('input').value)||0;
+        const width=parseInt(row.cells[1].querySelector('input').value)||0;
+        const count=parseInt(row.cells[2].querySelector('input').value)||0;
+        const stocks=Array.from(document.querySelectorAll(`#stockByWidth input[data-width='${width}']:checked`)).map(cb=>parseInt(cb.value));
+        return {length,width,count,stocks};
+      }).filter(n=>n.length>0&&n.width>0&&n.count>0);
+    }
+
+    let usedBoardsGlobal=[];
+    function generateCutList(){
+      document.getElementById('toast').style.display='none';
+      const needs=parseNeeds(); if(!needs.length){alert('Ange giltiga rader!');return;}
+      const kerf=parseFloat(document.getElementById('kerfInput').value)||0;
+      const used=[];
+      needs.forEach(({length,width,count,stocks})=>{
+        let pieces=Array(count).fill({length,width});
+        while(pieces.length){
+          let best=null;
+          stocks.forEach(stock=>{
+            let rem=stock; const combo=[];
+            pieces.forEach(p=>{const need=p.length+(combo.length?kerf:0);if(need<=rem){rem-=need;combo.push(p);}});
+            if(!best||rem<best.remain)best={stock,remain:rem,combo};
+          });
+          if(!best||!best.combo.length)break;
+          best.combo.forEach(p=>{pieces.splice(pieces.findIndex(x=>x===p),1);});
+          used.push({length:best.stock,width,used:best.combo,waste:best.remain});
+        }
+      }); usedBoardsGlobal=used; updateVisualization(); document.getElementById('pdfButton').style.display='block';
+    }
+
+    function updateVisualization(){
+      const mode=document.querySelector('input[name="mode"]:checked').value;
+      const kerf=parseFloat(document.getElementById('kerfInput').value)||0;
+      const res=document.getElementById('result'); res.innerHTML=''; let totalWaste=0; const summary={};
+      usedBoardsGlobal.forEach((b,i)=>{
+        totalWaste+=b.waste; const key=`${b.length}×${b.width}`; summary[key]=(summary[key]||0)+1;
+        res.appendChild(document.createTextNode(`Bräda ${i+1}: ${b.length}×${b.width} mm (spill: ${b.waste} mm)`));res.appendChild(document.createElement('br'));
+        const boardDiv=document.createElement('div');boardDiv.className='board';
+        b.used.forEach(p=>{
+          const cutDiv=document.createElement('div');cutDiv.className='cut';cutDiv.style.flex=`0 0 ${(p.length/b.length*100).toFixed(2)}%`;cutDiv.setAttribute('data-label',`${p.length} mm`);boardDiv.appendChild(cutDiv);
+          const gapDiv=document.createElement('div');gapDiv.className='kerf-gap';gapDiv.style.flex=`0 0 ${(kerf/b.length*100).toFixed(2)}%`;boardDiv.appendChild(gapDiv);
+        });res.appendChild(boardDiv);
+      });
+      const pre1=document.createElement('pre');pre1.textContent=`Totalt spill: ${totalWaste} mm\nAntal brädor: ${usedBoardsGlobal.length}`;res.appendChild(pre1);
+      const pre2=document.createElement('pre');pre2.textContent='Du behöver:\n'+Object.entries(summary).map(([d,c])=>`- ${c} st ${d} mm`).join('\n');res.appendChild(pre2);
+    }
+
+    async function downloadPDF(){const{jsPDF}=window.jspdf;const doc=new jsPDF();let y=10;
+      usedBoardsGlobal.forEach((b,i)=>{doc.text(`Bräda ${i+1}: ${b.length}×${b.width} mm`,10,y);y+=6;b.used.forEach((p,j)=>{doc.text(`- Bit ${j+1}: ${p.length} mm`,14,y);y+=5;});doc.text(`Spill: ${b.waste} mm`,14,y);y+=10;if(y>270){doc.addPage();y=10;}});
+      doc.text('Du behöver:',10,y);y+=6;const summary={};usedBoardsGlobal.forEach(b=>{const k=`${b.length}×${b.width}`;summary[k]=(summary[k]||0)+1;});
+      Object.entries(summary).forEach(([d,c])=>{doc.text(`- ${c} st ${d} mm`,14,y);y+=6;if(y>270){doc.addPage();y=10;}});
+      doc.save('kaplista.pdf');}
+
+    function saveProject(){localStorage.setItem('kaplistaProjekt',JSON.stringify({needs:parseNeeds(),stocks:null,kerf:document.getElementById('kerfInput').value}));alert('Sparat');}
+    function loadProject(){const d=JSON.parse(localStorage.getItem('kaplistaProjekt')||'null');if(!d)return alert('Inget projekt');document.getElementById('kerfInput').value=d.kerf; initStockSection();}
+
+    function initStockSection(){ updateStockByWidth(); attachListeners(); }
+    function attachListeners(){ document.querySelectorAll('.widthInput').forEach(i=>i.onchange=updateStockByWidth); }
+
+    // Toaster functions
+function showToast() { document.getElementById('toast').style.display = 'block'; }
+function hideToast() { document.getElementById('toast').style.display = 'none'; }
+
+// Auto-generate and toast on any config change
+function handleChange() {
+  generateCutList();
+  showToast();
+  setTimeout(hideToast, 2000);
+}
+
+document.addEventListener('change', event => {
+  if(event.target.matches('#kerfInput, .widthInput, #needsTable input, #stockByWidth input, input[name="mode"]')) {
+    handleChange();
+  }
+});
+
+window.onload = () => { initStockSection(); generateCutList(); };
+
+    // Uppdatera lagerföringsinställningar
+    function updateStockByWidth(){
+      const container=document.getElementById('stockByWidth');
+      if(!container) return;
+      const widths=[...new Set(Array.from(document.querySelectorAll('.widthInput')).map(i=>parseInt(i.value)||0))].filter(w=>w>0);
+      container.innerHTML='';
+      widths.forEach(w=>{
+        const div=document.createElement('div');
+        div.innerHTML=`<strong>${w} mm:</strong> `+[2700,3000,3300,3600,3900,4200,4500,4800,5100,5400].map(len=>`<label><input type='checkbox' data-width='${w}' value='${len}' checked/> ${len} mm</label>`).join('');
+        container.appendChild(div);
+      });
+    }
+  </script>
+</body>
+</html>
